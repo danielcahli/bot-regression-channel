@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+logs/
+*_perf.csv
+batch_summary*.csv
+grid_summary*.csv
+regime_*.csv
+portfolio_*.csv
