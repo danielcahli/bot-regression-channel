@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Combine multiple *_perf.csv into a single equal- or custom-weight portfolio.
+"""
+Combine multiple *_perf.csv into a portfolio with row-wise weight renormalization.
+Outputs ret_port and equity, plus prints basic stats.
+"""
 
-from __future__ import annotations
 import sys, argparse
 from pathlib import Path
 import numpy as np
@@ -46,8 +48,7 @@ def main():
 
     mask = ~np.isnan(rets)
     w_mat = np.where(mask, w, 0.0)
-    row_sum = w_mat.sum(axis=1, keepdims=True)
-    row_sum[row_sum == 0] = 1.0
+    row_sum = w_mat.sum(axis=1, keepdims=True); row_sum[row_sum == 0] = 1.0
     w_norm = w_mat / row_sum
     port_ret = np.nansum(rets * w_norm, axis=1)
 

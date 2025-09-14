@@ -1,0 +1,47 @@
+{
+  "created_at": "20250910_071343",
+  "task": "reg",
+  "horizon": 10,
+  "resample": "30min",
+  "feature_cols": [
+    "open",
+    "high",
+    "low",
+    "volume",
+    "ret_1",
+    "logret_1",
+    "ret_2",
+    "ret_3",
+    "ret_5",
+    "ret_10",
+    "roll_mean_10",
+    "roll_std_10",
+    "zclose_10",
+    "roll_mean_20",
+    "roll_std_20",
+    "zclose_20",
+    "roll_mean_50",
+    "roll_std_50",
+    "zclose_50",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "bb_z",
+    "atr_14",
+    "atrp_14"
+  ],
+  "thr_mode": "quantile",
+  "thresholds": {
+    "long": 0.010372437164187431,
+    "short": -0.002815330307930707,
+    "reg_exit_mult": 0.35,
+    "cls_exit_delta": null
+  },
+  "filters": {
+    "trend_filter": "ema200",
+    "ema_span": 200,
+    "vol_filter_q": 0.85,
+    "atrp_threshold": 0.012818457944681607
+  }
+}

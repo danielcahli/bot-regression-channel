@@ -1,0 +1,9 @@
+{
+  "bars": 4000,
+  "trades": 6,
+  "total_return": -0.046195279772790476,
+  "sharpe": -1.0436247956654763,
+  "max_drawdown": -0.14416967860721075,
+  "fee_bps": 10.0,
+  "slippage_bps": 5.0
+}

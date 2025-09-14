@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""
+Runs the regression-channel signal on 5-minute bars and (optionally) places
+Binance USDT-M futures orders. Long-only, flat exit on stop.
+
+Requires .env with BINANCE_KEY, BINANCE_SECRET in the project root.
+"""
+import argparse, math, sys, time
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import ccxt
+from dotenv import dotenv_values
+
+RESAMPLE = "5min"  # 5T is deprecated
+
+def last_regression_band(closes: pd.Series, window: int, k: float):
+    """Return center/upper/lower/sigma/slope using a numerically stable fit."""
+    y = closes.iloc[-window:].to_numpy(dtype=float)
+    x = np.arange(window, dtype=float)
+    x = x - x[-1]                       # last bar at x=0
+    slope, intercept = np.polyfit(x, y, 1)   # y = slope*x + intercept
+    yhat = slope * x + intercept
+    resid = y - yhat
+    sigma = float(np.std(resid, ddof=1))
+    return {
+        "center": float(intercept),
+        "upper":  float(intercept + k * sigma),
+        "lower":  float(intercept - k * sigma),
+        "sigma":  sigma,
+        "slope":  float(slope),
+    }
+
+def load_1m_from_ccxt(ex, symbol: str, minutes: int = 48*60) -> pd.DataFrame:
+    """Pull last N minutes of 1m futures bars via ccxt and return OHLCV dataframe."""
+    # ccxt market id (e.g. ETHUSDT) and timeframe
+    since = int(time.time() * 1000) - minutes * 60_000
+    bars = []
+    limit = 1000
+    tf = "1m"
+    while True:
+        chunk = ex.fetch_ohlcv(symbol, timeframe=tf, since=since, limit=limit)
+        if not chunk:
+            break
+        bars += chunk
+        if len(chunk) < limit:
+            break
+        since = chunk[-1][0] + 60_000
+        if len(bars) >= minutes:        # enough
+            break
+        time.sleep(ex.rateLimit/1000)
+    if not bars:
+        raise RuntimeError(f"No OHLCV from exchange for {symbol}")
+    df = pd.DataFrame(bars, columns=["timestamp","open","high","low","close","volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df = df.set_index("timestamp").sort_index()
+    return df
+
+def compute_signal(df1m: pd.DataFrame, window: int, k: float, stop_k: float):
+    """Resample to 5min and compute signal (long_enter / flat_exit / hold)."""
+    ohlc = df1m.resample(RESAMPLE, label="right", closed="right").agg(
+        {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
+    ).dropna()
+    if len(ohlc) < window:
+        raise ValueError(f"Not enough bars for window={window}: have {len(ohlc)}")
+    band = last_regression_band(ohlc["close"], window, k)
+    close = float(ohlc["close"].iloc[-1])
+    # Stop line:
+    stop_line = band["center"] - stop_k * band["sigma"]
+    if close < stop_line:
+        sig = "flat_exit"
+        reason = "stop_line_broken"
+    elif close > band["upper"] and band["slope"] > 0:
+        sig = "long_enter"
+        reason = "breakout_up"
+    else:
+        sig = "hold"
+        reason = "inside_channel"
+    return close, band, sig, reason
+
+def maker_px_qty(ex, symbol: str, side: str, qty_usdt: float):
+    """Return (price, qty) as valid maker order just off the book, and sized."""
+    ex.load_markets()
+    m = ex.market(symbol)
+    fs = {f["filterType"]: f for f in m["info"]["filters"]}
+    tick = float(fs["PRICE_FILTER"]["tickSize"])
+    step = float(fs["LOT_SIZE"]["stepSize"])
+    min_not = float(fs.get("MIN_NOTIONAL", {}).get("notional", 20.0))
+    t = ex.fetch_ticker(symbol)
+    bid = t.get("bid") or t.get("last")
+    ask = t.get("ask") or t.get("last")
+    if side == "buy":
+        px = math.floor((bid - 2*tick) / tick) * tick
+    else:
+        px = math.ceil((ask + 2*tick) / tick) * tick
+    # qty from desired notional, but at least min_notional
+    notional = max(min_not, qty_usdt)
+    raw_qty = notional / px
+    qty_steps = math.ceil(raw_qty / step)
+    qty = qty_steps * step
+    qty = float(ex.amount_to_precision(symbol, qty))
+    px = float(ex.price_to_precision(symbol, px))
+    return px, qty
+
+def fetch_long_contracts(ex, symbol: str) -> float:
+    """Return current long size (contracts), 0 if flat."""
+    try:
+        pos = ex.fetch_positions([symbol]) or []
+    except Exception:
+        pos = []
+    if not pos:
+        return 0.0
+    # unified structure
+    c = pos[0].get("contracts")
+    return float(c or 0)
+
+def cancel_all_open(ex, symbol: str):
+    """Cancel any open orders for the symbol (best-effort)."""
+    try:
+        for o in ex.fetch_open_orders(symbol):
+            try:
+                ex.cancel_order(o["id"], symbol)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbols", required=True,
+                    help="Comma-separated, e.g. ETH/USDT:USDT,XRP/USDT:USDT")
+    ap.add_argument("--window", type=int, default=800)
+    ap.add_argument("--k", type=float, default=2.0)
+    ap.add_argument("--stop_k", type=float, default=1.0)
+    ap.add_argument("--minutes", type=int, default=48*60, help="1m history to fetch")
+    ap.add_argument("--qty_usdt", type=float, default=25.0)
+    ap.add_argument("--dry_run", action="store_true")
+    args = ap.parse_args()
+
+    cfg = dotenv_values(".env")
+    if not (cfg.get("BINANCE_KEY") and cfg.get("BINANCE_SECRET")):
+        print("[FATAL] Put BINANCE_KEY and BINANCE_SECRET in .env", file=sys.stderr)
+        sys.exit(2)
+
+    ex = ccxt.binance({
+        "apiKey": cfg["BINANCE_KEY"],
+        "secret": cfg["BINANCE_SECRET"],
+        "enableRateLimit": True,
+        "options": {"defaultType": "future"},
+    })
+
+    for sym in [s.strip() for s in args.symbols.split(",") if s.strip()]:
+        try:
+            df1m = load_1m_from_ccxt(ex, sym, minutes=args.minutes)
+            close, band, sig, reason = compute_signal(df1m, args.window, args.k, args.stop_k)
+            print(f"{sym} | close={close:.4f}  center={band['center']:.4f} "
+                  f"upper={band['upper']:.4f} lower={band['lower']:.4f} slope={band['slope']:.6f}")
+            print(f" → SIGNAL: {sig}  ({reason})")
+
+            pos = fetch_long_contracts(ex, sym)
+
+            if sig == "long_enter" and pos <= 0:
+                px, qty = maker_px_qty(ex, sym, "buy", args.qty_usdt)
+                print(f"   ENTER LONG plan: BUY {qty} @ {px} (GTX)")
+                if not args.dry_run:
+                    cancel_all_open(ex, sym)
+                    o = ex.create_order(sym, "limit", "buy", qty, px,
+                                        params={"timeInForce":"GTX","recvWindow":5000})
+                    print("   Placed BUY id:", o.get("id"))
+                else:
+                    print("   [DRY-RUN] not placing order")
+            elif sig == "flat_exit" and pos > 0:
+                # close *all* contracts
+                ex.load_markets()
+                step = float([f for f in ex.market(sym)["info"]["filters"]
+                              if f["filterType"]=="LOT_SIZE"][0]["stepSize"])
+                qty = math.floor(pos/step)*step
+                qty = float(ex.amount_to_precision(sym, qty))
+                px, _ = maker_px_qty(ex, sym, "sell", args.qty_usdt)
+                print(f"   EXIT plan: SELL {qty} @ {px} (GTX reduceOnly)")
+                if qty > 0:
+                    if not args.dry_run:
+                        cancel_all_open(ex, sym)
+                        o = ex.create_order(sym, "limit", "sell", qty, px,
+                                            params={"timeInForce":"GTX","reduceOnly":True,"recvWindow":5000})
+                        print("   Placed SELL id:", o.get("id"))
+                    else:
+                        print("   [DRY-RUN] not placing order")
+                else:
+                    print("   (nothing to close)")
+            else:
+                print("   HOLD: no action.")
+        except ValueError as ve:
+            print(f"[WARN] {sym}: {ve}")
+        except Exception as e:
+            print(f"[ERROR] {sym}: {type(e).__name__}: {e}")
+
+if __name__ == "__main__":
+    main()

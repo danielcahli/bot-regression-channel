@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /home/danielcahli/projetos/bot-regression-channel
+LOG="logs/trader_$(date +%F).log"
+mkdir -p logs
+exec flock -n /tmp/signal_exec.lock -c '
+  . .venv/bin/activate
+  {
+    echo "=== START $(date -Is) ==="
+    nice -n 10 python3 trading/signal_executor.py \
+      --symbols ETH/USDT:USDT,XRP/USDT:USDT \
+      --window 800 --k 2.0 --stop_k 1.0 \
+      --qty_usdt 25 --minutes 4320
+    ec=$?
+    echo "=== END $(date -Is) ec=$ec ==="
+    exit $ec
+  } >> "'"$LOG"'" 2>&1
+'

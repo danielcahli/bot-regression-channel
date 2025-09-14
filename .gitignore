@@ -1,10 +1,20 @@
+# venv / IDE
 .venv/
+.vscode/
+.idea/
 __pycache__/
 *.pyc
-data/
+.DS_Store
+
+# secrets
+.env
+*.key
+*.pem
+
+# logs and data artifacts
 logs/
-*_perf.csv
-batch_summary*.csv
-grid_summary*.csv
-regime_*.csv
-portfolio_*.csv
+data/
+*.csv
+
+# notebooks
+.ipynb_checkpoints/
