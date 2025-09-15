@@ -18,3 +18,4 @@ data/
 
 # notebooks
 .ipynb_checkpoints/
+.env.*
